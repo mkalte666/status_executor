@@ -275,10 +275,7 @@ where
     /// this will return `true` as long as the underlying channel exists.
     /// You can use the return value to check if the `StatusExecutor` was dropped.
     pub fn send(&self, s: S) -> bool {
-        match self.tx.send(s) {
-            Ok(_) => true,
-            _ => false,
-        }
+        self.tx.send(s).is_ok()
     }
 }
 
@@ -309,14 +306,9 @@ pub trait Context: internal_context::InternalContext {}
 
 /// An executor used to run functions on `std::thread::spawn()` instances.
 /// You can just `Default` this one, right now it has no state
+#[derive(Debug, Default)]
 pub struct StdContext {
     _tag: (),
-}
-
-impl Default for StdContext {
-    fn default() -> Self {
-        Self { _tag: () }
-    }
 }
 
 impl Context for StdContext {}
@@ -337,9 +329,9 @@ impl internal_context::InternalContext for StdContext {
                     .res = Some(Arc::new(r));
             });
         }));
-        match res {
-            Err(_) => std::process::abort(),
-            _ => {}
+
+        if res.is_err() {
+            std::process::abort();
         }
     }
 }
@@ -354,14 +346,9 @@ pub mod rayon_context {
     use crate::internal_context::{InternalContext, InternalData};
 
     /// `RayonGlobalContext` runs things on rayons global executor. use `RayonGlobalContext::default()`.
+    #[derive(Debug, Default)]
     pub struct RayonGlobalContext {
         _tag: (),
-    }
-
-    impl Default for RayonGlobalContext {
-        fn default() -> Self {
-            Self { _tag: () }
-        }
     }
 
     impl InternalContext for RayonGlobalContext {
@@ -384,6 +371,7 @@ pub mod rayon_context {
 
     /// `RayonContext` runs things on a rayon thread pool. Thin wrapper around a reference to `ThreadPool`.
     /// Its fine to just use `RayonExecutor::new()` every time.
+    #[derive(Debug)]
     pub struct RayonContext<'a> {
         pool: &'a ThreadPool,
     }
