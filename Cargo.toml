@@ -1,0 +1,19 @@
+[package]
+name = "status_executor"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rayon = { version = "1.8", optional = true}
+
+[[example]]
+name="with_rayon"
+path="examples/with_rayon.rs"
+required-features=["rayon"]
+
+[[example]]
+name="with_rayon_global"
+path="examples/with_rayon_global.rs"
+required-features=["rayon"]
