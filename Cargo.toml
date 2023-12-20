@@ -1,9 +1,15 @@
 [package]
 name = "status_executor"
 version = "0.1.0"
+description = "Run your work on some context (thread) and get status info back"
+authors = ["Malte Kießling <mkalte@mkalte.me>"]
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+rust-version = "1.63"
+license = "MIT OR Apache-2.0"
+repository = "https://git.mkalte.me:mkalte/status_executor"
+keywords = ["parallel", "thread", "concurrency"]
+categories = ["concurrency"]
+exclude = ["/.idea/","/.gitlab/"]
 
 [dependencies]
 rayon = { version = "1.8", optional = true}
