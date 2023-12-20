@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com:mkalte666/status_executor"
 keywords = ["parallel", "thread", "concurrency"]
 categories = ["concurrency"]
-exclude = ["/.idea/","/.gitlab/"]
+exclude = ["/.idea/","/.gitlab/","/.github"]
 
 [dependencies]
 rayon = { version = "1.8", optional = true}
