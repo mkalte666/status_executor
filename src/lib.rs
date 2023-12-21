@@ -375,7 +375,7 @@ pub trait Context: internal_context::InternalContext {}
 
 /// An executor used to run functions on `std::thread::spawn()` instances.
 /// You can just `Default` this one, right now it has no state
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct StdContext {
     _tag: (),
 }
@@ -416,7 +416,7 @@ pub mod rayon_context {
     use crate::internal_context::{InternalContext, InternalData};
 
     /// `RayonGlobalContext` runs things on rayons global executor. use `RayonGlobalContext::default()`.
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Clone)]
     pub struct RayonGlobalContext {
         _tag: (),
     }
