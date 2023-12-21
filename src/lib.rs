@@ -159,8 +159,7 @@ where
 ///  This status can then be updated from within the work function.
 pub struct StatusExecutor<T, S> {
     state: Arc<Mutex<InternalData<T>>>,
-    rx: Receiver<S>,
-    last_status: Mutex<Option<S>>,
+    status: Mutex<StatusData<S>>,
 }
 
 impl<T, S> StatusExecutor<T, S>
@@ -189,8 +188,10 @@ where
 
         Self {
             state,
-            rx,
-            last_status: Mutex::new(None),
+            status: Mutex::new(StatusData {
+                rx,
+                last_status: None,
+            }),
         }
     }
 
@@ -200,8 +201,8 @@ where
     }
 
     /// internal locking for the persistant
-    fn lock_last_status(&self) -> MutexGuard<'_, Option<S>> {
-        self.last_status.lock().expect("Cannot lock internal last status of StatusExecutor. This means that the lock is poisoned, and *that*, in turn, means that the only owning thread has panicked by this point. I am unsure how one could get to this point.")
+    fn lock_status(&self) -> MutexGuard<'_, StatusData<S>> {
+        self.status.lock().expect("Cannot lock internal status of StatusExecutor. This means that the lock is poisoned, and *that*, in turn, means that the only owning thread has panicked by this point. I am unsure how one could get to this point.")
     }
 
     /// Returns true if the function passed into `StatusExecutor::new()` has completed
@@ -235,9 +236,10 @@ where
 
     /// Returns a status `Some(S)` if there are any status infos pending, or `None` if there isn't anything new.
     pub fn status(&self) -> Option<S> {
-        match self.rx.try_recv() {
+        let mut status = self.lock_status();
+        match status.rx.try_recv() {
             Ok(s) => {
-                *self.lock_last_status() = Some(s.clone());
+                status.last_status = Some(s.clone());
                 Some(s)
             }
             _ => None,
@@ -251,15 +253,23 @@ where
     /// Then it would block. However, for latest_status to be slower than a producer, the producer would basically have to call send() in an infinite loop
     /// That's not an intended use case, so its deemed an acceptable issue.
     pub fn latest_status(&self) -> Option<S> {
-        let latest = self.rx.try_iter().last();
+        let mut status = self.lock_status();
+        let latest = status.rx.try_iter().last();
         match latest {
             Some(s) => {
-                *self.lock_last_status() = Some(s.clone());
+                status.last_status = Some(s.clone());
                 Some(s)
             }
-            None => self.lock_last_status().clone(),
+            None => status.last_status.clone(),
         }
     }
+}
+
+/// Data needed for the status
+/// packed in a struct so they can be locked together
+struct StatusData<S> {
+    rx: Receiver<S>,
+    last_status: Option<S>,
 }
 
 /// A convenience struct around the channel used to send a status `S` from the worker to the `StatusExecutor`
