@@ -75,7 +75,7 @@ use std::{
     panic,
     sync::{
         mpsc::{channel, Receiver, Sender},
-        Arc, Mutex, MutexGuard,
+        Arc, Condvar, Mutex, MutexGuard,
     },
 };
 
@@ -88,7 +88,7 @@ use internal_context::InternalData;
 /// Of course, using `Executor::take()`, you can still grab the inner data if its available.
 ///
 pub struct Executor<T> {
-    state: Arc<Mutex<InternalData<T>>>,
+    state: Arc<InternalData<T>>,
 }
 
 impl<T> Executor<T>
@@ -105,16 +105,19 @@ where
         F: FnOnce() -> T + Send + 'static,
         E: Context,
     {
-        let state = Arc::new(Mutex::new(InternalData { res: None }));
+        let state = Arc::new(InternalData {
+            res: Mutex::new(None),
+            done: Condvar::new(),
+        });
 
         e.execute(state.clone(), f);
 
         Self { state }
     }
 
-    /// internal locking function for the stared state
-    fn lock_state(&self) -> MutexGuard<'_, InternalData<T>> {
-        match self.state.lock() {
+    /// internal locking function for the stared result
+    fn lock_res(&self) -> MutexGuard<'_, Option<Arc<T>>> {
+        match self.state.res.lock() {
             Ok(g) => g,
             Err(e) => {
                 panic!("Cannot lock internal state of Executor. This means that the lock is poisoned, and *that*, in turn, means that the thread has paniced. Lock result: {}",e);
@@ -124,12 +127,12 @@ where
 
     /// Returns true if the function passed into `Executor::new()` has completed
     pub fn is_done(&self) -> bool {
-        self.lock_state().res.is_some()
+        self.lock_res().is_some()
     }
 
     /// Returns `Some(Arc<T>)` if the function passed into `Execute::new()` has completed, or `None` otherwise
     pub fn result(&self) -> Option<Arc<T>> {
-        self.lock_state().res.clone()
+        self.lock_res().clone()
     }
 
     /// Consumes this `Executor`, returning either `Some(T)` if the executor has completed, or `None` if it has not.
@@ -138,16 +141,40 @@ where
     ///     There is no way to retrieve this data as well.
     ///     So you probably only want to only `Executor::take()` if `Executor::is_done()` returnd true before.
     /// </div>
+    /// Will also return 'None' someone already grabbed using result() and the arc is still alive as we cannot into_inner anymore
     pub fn take_result(self) -> Option<T> {
         match Arc::into_inner(self.state) {
             None => None,
-            Some(mtx) => {
-                let state = mtx
-                    .into_inner()
-                    .expect("Executor state was poisoned, probably due to panic in work thread.");
-                state.res.map(|x| Arc::into_inner(x)).unwrap_or(None)
-            }
+            Some(res) => res
+                .res
+                .into_inner()
+                .expect("Executor state was poisoned, probably due to panic in work thread.")
+                .and_then(|x| Arc::into_inner(x)),
         }
+    }
+
+    /// Wait for this executor to complete.
+    ///
+    /// <div class="warning">
+    /// If the thread panics while you are waiting, and there is a panic handler in the executor (Rayon might do this!)
+    /// this function will wait forever. It should be fine (mostly panics will abort() anyway), but keep this in mind!
+    /// </div>
+    pub fn wait(&self) -> Arc<T> {
+        let mut res = self.lock_res();
+        while res.is_none() {
+            res = self.state.done.wait(res).unwrap();
+        }
+        res.clone().unwrap()
+    }
+
+    /// Read 'wait' for notes on this
+    /// Same as take, but waits
+    pub fn take_wait(&self) -> T {
+        let mut res = self.lock_res();
+        while res.is_none() {
+            res = self.state.done.wait(res).unwrap();
+        }
+        Arc::into_inner(res.take().unwrap()).unwrap()
     }
 }
 
@@ -158,7 +185,7 @@ where
 /// `StatusExecutor` additionally takes a Status `S` (which has to be `Send + 'static` for the underlying channel).
 ///  This status can then be updated from within the work function.
 pub struct StatusExecutor<T, S> {
-    state: Arc<Mutex<InternalData<T>>>,
+    state: Arc<InternalData<T>>,
     status: Mutex<StatusData<S>>,
 }
 
@@ -179,7 +206,10 @@ where
         F: FnOnce(StatusSender<S>) -> T + Send + 'static,
         E: Context,
     {
-        let state = Arc::new(Mutex::new(InternalData { res: None }));
+        let state = Arc::new(InternalData {
+            res: Mutex::new(None),
+            done: Condvar::new(),
+        });
 
         let (tx, rx) = channel();
         let sender = StatusSender { tx };
@@ -195,43 +225,71 @@ where
         }
     }
 
-    /// internal locking for the state
-    fn lock_state(&self) -> MutexGuard<'_, InternalData<T>> {
-        self.state.lock().expect("Cannot lock internal state of StatusExecutor. This means that the lock is poisoned, and *that*, in turn, means that the thread has panicked.")
+    /// internal locking function for the stared result
+    fn lock_res(&self) -> MutexGuard<'_, Option<Arc<T>>> {
+        match self.state.res.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                panic!("Cannot lock internal state of Executor. This means that the lock is poisoned, and *that*, in turn, means that the thread has paniced. Lock result: {}",e);
+            }
+        }
+    }
+
+    /// Returns true if the function passed into `Executor::new()` has completed
+    pub fn is_done(&self) -> bool {
+        self.lock_res().is_some()
+    }
+
+    /// Returns `Some(Arc<T>)` if the function passed into `Execute::new()` has completed, or `None` otherwise
+    pub fn result(&self) -> Option<Arc<T>> {
+        self.lock_res().clone()
+    }
+
+    /// Consumes this `Executor`, returning either `Some(T)` if the executor has completed, or `None` if it has not.
+    /// <div class="warning">
+    ///     There is no way for the work function if you you unsuccessfully tried to take the data. It will run to its end.
+    ///     There is no way to retrieve this data as well.
+    ///     So you probably only want to only `Executor::take()` if `Executor::is_done()` returnd true before.
+    /// </div>
+    /// Will also return 'None' someone already grabbed using result() and the arc is still alive as we cannot into_inner anymore
+    pub fn take_result(self) -> Option<T> {
+        match Arc::into_inner(self.state) {
+            None => None,
+            Some(res) => res
+                .res
+                .into_inner()
+                .expect("Executor state was poisoned, probably due to panic in work thread.")
+                .and_then(|x| Arc::into_inner(x)),
+        }
+    }
+
+    /// Wait for this executor to complete.
+    ///
+    /// <div class="warning">
+    /// If the thread panics while you are waiting, and there is a panic handler in the executor (Rayon might do this!)
+    /// this function will wait forever. It should be fine (mostly panics will abort() anyway), but keep this in mind!
+    /// </div>
+    pub fn wait(&self) -> Arc<T> {
+        let mut res = self.lock_res();
+        while res.is_none() {
+            res = self.state.done.wait(res).unwrap();
+        }
+        res.clone().unwrap()
+    }
+
+    /// Read 'wait' for notes on this
+    /// Same as take, but waits
+    pub fn take_wait(&self) -> T {
+        let mut res = self.lock_res();
+        while res.is_none() {
+            res = self.state.done.wait(res).unwrap();
+        }
+        Arc::into_inner(res.take().unwrap()).unwrap()
     }
 
     /// internal locking for the persistant
     fn lock_status(&self) -> MutexGuard<'_, StatusData<S>> {
         self.status.lock().expect("Cannot lock internal status of StatusExecutor. This means that the lock is poisoned, and *that*, in turn, means that the only owning thread has panicked by this point. I am unsure how one could get to this point.")
-    }
-
-    /// Returns true if the function passed into `StatusExecutor::new()` has completed
-    pub fn is_done(&self) -> bool {
-        self.lock_state().res.is_some()
-    }
-
-    /// Returns `Some(Arc<T>)` if the function passed into `StatusExecutor::new()` has completed, or `None` otherwise
-    pub fn result(&self) -> Option<Arc<T>> {
-        self.lock_state().res.clone()
-    }
-
-    /// Consumes this `Executor`, returning either `Some(T)` if the executor has completed, or `None` if it has not.
-    /// <div class="warning">
-    ///     There is no way to retrieve the data if you call this before the work function is done.
-    ///     So you probably only want to only `Executor::take()` if `Executor::is_done()` returnd true before.
-    /// </div>
-    ///
-    /// `StatusSender::send` will begin to return false if you take before the execution is done, so you could abort processing that way.
-    pub fn take_result(self) -> Option<T> {
-        match Arc::into_inner(self.state) {
-            None => None,
-            Some(mtx) => {
-                let state = mtx.into_inner().expect(
-                    "StatusExecutor state was poisoned, probably due to panic in work thread.",
-                );
-                state.res.map(|x| Arc::into_inner(x)).unwrap_or(None)
-            }
-        }
     }
 
     /// Returns a status `Some(S)` if there are any status infos pending, or `None` if there isn't anything new.
@@ -291,18 +349,19 @@ where
 
 /// Private types are wrapped in here for the Trait Sealing to work
 mod internal_context {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
 
     /// Tracks internal state
     /// Mostly useful because of the rayon feature - rayon gives no join handles.
     pub struct InternalData<T> {
-        pub res: Option<Arc<T>>,
+        pub res: Mutex<Option<Arc<T>>>,
+        pub done: Condvar,
     }
 
     /// Executors must implement this
     pub trait InternalContext {
         /// run function `f*  on this context, using `state` to return data back to the `Executor` or `StatusExecutor`
-        fn execute<T, F>(&self, state: Arc<Mutex<InternalData<T>>>, f: F)
+        fn execute<T, F>(&self, state: Arc<InternalData<T>>, f: F)
         where
             T: Send + Sync + 'static,
             F: FnOnce() -> T + Send + 'static;
@@ -324,7 +383,7 @@ pub struct StdContext {
 impl Context for StdContext {}
 
 impl internal_context::InternalContext for StdContext {
-    fn execute<T, F>(&self, state: Arc<Mutex<InternalData<T>>>, f: F)
+    fn execute<T, F>(&self, state: Arc<InternalData<T>>, f: F)
     where
         T: Send + Sync + 'static,
         F: FnOnce() -> T + Send + 'static,
@@ -333,10 +392,11 @@ impl internal_context::InternalContext for StdContext {
         let res = panic::catch_unwind(panic::AssertUnwindSafe(move || {
             std::thread::spawn(move || {
                 let r = f();
-                state
+                *state
+                    .res
                     .lock()
-                    .expect("main thread panicked for this executor")
-                    .res = Some(Arc::new(r));
+                    .expect("main thread panicked for this executor") = Some(Arc::new(r));
+                state.done.notify_all();
             });
         }));
 
@@ -349,7 +409,7 @@ impl internal_context::InternalContext for StdContext {
 /// With feature "rayon", this module holds the implementations for `RayonGlobalContext` and `RayonContext`
 #[cfg(feature = "rayon")]
 pub mod rayon_context {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use rayon::ThreadPool;
 
@@ -362,17 +422,18 @@ pub mod rayon_context {
     }
 
     impl InternalContext for RayonGlobalContext {
-        fn execute<T, F>(&self, state: Arc<Mutex<InternalData<T>>>, f: F)
+        fn execute<T, F>(&self, state: Arc<InternalData<T>>, f: F)
         where
             T: Send + Sync + 'static,
             F: FnOnce() -> T + Send + 'static,
         {
             rayon::spawn(move || {
                 let r = f();
-                state
+                *state
+                    .res
                     .lock()
-                    .expect("main thread panicked for this executor")
-                    .res = Some(Arc::new(r));
+                    .expect("main thread panicked for this executor") = Some(Arc::new(r));
+                state.done.notify_all();
             });
         }
     }
@@ -394,17 +455,18 @@ pub mod rayon_context {
     }
 
     impl InternalContext for RayonContext<'_> {
-        fn execute<T, F>(&self, state: Arc<Mutex<InternalData<T>>>, f: F)
+        fn execute<T, F>(&self, state: Arc<InternalData<T>>, f: F)
         where
             T: Send + Sync + 'static,
             F: FnOnce() -> T + Send + 'static,
         {
             self.pool.spawn(move || {
                 let r = f();
-                state
+                *state
+                    .res
                     .lock()
-                    .expect("main thread panicked for this executor")
-                    .res = Some(Arc::new(r));
+                    .expect("main thread panicked for this executor") = Some(Arc::new(r));
+                state.done.notify_all();
             });
         }
     }
@@ -417,6 +479,8 @@ pub use rayon_context::*;
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -449,5 +513,27 @@ mod tests {
 
         assert_eq!(e.result().map(|x| *x), Some(1234));
         assert_eq!(e.take_result(), Some(1234));
+    }
+
+    #[test]
+    fn wait_arc() {
+        let e = Executor::new(StdContext::default(), move || {
+            std::thread::sleep(Duration::from_millis(150));
+            1234
+        });
+
+        let val = *e.wait().as_ref();
+        assert_eq!(val, 1234);
+    }
+
+    #[test]
+    fn wait_take() {
+        let e = Executor::new(StdContext::default(), move || {
+            std::thread::sleep(Duration::from_millis(150));
+            1234
+        });
+
+        let val = e.take_wait();
+        assert_eq!(val, 1234);
     }
 }
