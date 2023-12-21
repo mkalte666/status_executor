@@ -536,4 +536,20 @@ mod tests {
         let val = e.take_wait();
         assert_eq!(val, 1234);
     }
+
+    #[test]
+    fn wait_arc_complete() {
+        let e = Executor::new(StdContext::default(), move || 1234);
+        std::thread::sleep(Duration::from_millis(10));
+        let val = *e.wait().as_ref();
+        assert_eq!(val, 1234);
+    }
+
+    #[test]
+    fn wait_take_complete() {
+        let e = Executor::new(StdContext::default(), move || 1234);
+        std::thread::sleep(Duration::from_millis(10));
+        let val = e.take_wait();
+        assert_eq!(val, 1234);
+    }
 }
