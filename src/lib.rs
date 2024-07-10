@@ -87,6 +87,7 @@ use internal_context::InternalData;
 /// This allows the `Executor` to be stored itself, and accesses via `Executor::result()` are a cheap arc clone instead of requiring moves.
 /// Of course, using `Executor::take()`, you can still grab the inner data if its available.
 ///
+#[derive(Debug)]
 pub struct Executor<T> {
     state: Arc<InternalData<T>>,
 }
@@ -184,6 +185,7 @@ where
 ///
 /// `StatusExecutor` additionally takes a Status `S` (which has to be `Send + 'static` for the underlying channel).
 ///  This status can then be updated from within the work function.
+#[derive(Debug)]
 pub struct StatusExecutor<T, S> {
     state: Arc<InternalData<T>>,
     status: Mutex<StatusData<S>>,
@@ -325,12 +327,14 @@ where
 
 /// Data needed for the status
 /// packed in a struct so they can be locked together
+#[derive(Debug)]
 struct StatusData<S> {
     rx: Receiver<S>,
     last_status: Option<S>,
 }
 
 /// A convenience struct around the channel used to send a status `S` from the worker to the `StatusExecutor`
+#[derive(Debug)]
 pub struct StatusSender<S> {
     tx: Sender<S>,
 }
@@ -353,6 +357,7 @@ mod internal_context {
 
     /// Tracks internal state
     /// Mostly useful because of the rayon feature - rayon gives no join handles.
+    #[derive(Debug)]
     pub struct InternalData<T> {
         pub res: Mutex<Option<Arc<T>>>,
         pub done: Condvar,
